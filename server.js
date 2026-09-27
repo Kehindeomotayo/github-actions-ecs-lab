@@ -1,0 +1,15 @@
+const http = require("node:http");
+
+const server = http.createServer((req, res) => {
+  if (req.url === "/health") {
+    res.writeHead(200, { "Content-Type": "text/plain" });
+    return res.end("OK");
+  }
+
+  res.writeHead(200, { "Content-Type": "text/html" });
+  res.end("<h1>Deployed with GitHub Actions to AWS ECS!</h1>");
+});
+
+server.listen(3000, "0.0.0.0", () => {
+  console.log("App listening on port 3000");
+});
