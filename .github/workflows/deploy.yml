@@ -1,0 +1,173 @@
+name: Test, Scan and Deploy to ECS
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: github-actions-ecs-lab
+  ECS_CLUSTER: github-actions-lab
+  ECS_SERVICE: github-actions-lab-task-service-bxe4iiwc
+  CONTAINER_NAME: web
+
+jobs:
+  checks:
+    name: Test and security scans
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Validate JavaScript and task definition
+        run: |
+          node --check server.js
+          node -e "JSON.parse(require('fs').readFileSync('task-definition.json', 'utf8'))"
+
+      - name: Scan source files for secrets
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: secret
+          severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
+          exit-code: '1'
+          format: table
+
+      - name: Build container image
+        run: docker build --platform linux/amd64 -t ecs-lab:${{ github.sha }} .
+
+      - name: Test container health endpoint
+        run: |
+          docker run -d --name app-test -p 127.0.0.1:3000:3000 ecs-lab:${{ github.sha }}
+          trap 'docker logs app-test; docker rm -f app-test' EXIT
+
+          for attempt in $(seq 1 15); do
+            if response=$(curl -fsS --max-time 2 http://127.0.0.1:3000/health); then
+              if [ "$response" = "OK" ]; then
+                echo "Health endpoint passed"
+                exit 0
+              fi
+            fi
+            sleep 2
+          done
+
+          echo "Health endpoint failed"
+          exit 1
+
+      - name: Scan container for vulnerabilities and secrets
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: image
+          image-ref: ecs-lab:${{ github.sha }}
+          scanners: vuln,secret
+          severity: HIGH,CRITICAL
+          ignore-unfixed: false
+          exit-code: '1'
+          format: table
+
+      - name: Save checked image
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: docker save ecs-lab:${{ github.sha }} -o image.tar
+
+      - name: Upload checked image
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v4
+        with:
+          name: checked-image
+          path: image.tar
+          retention-days: 1
+          compression-level: 0
+          if-no-files-found: error
+
+  deploy:
+    name: Deploy to AWS ECS
+    needs: checks
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    permissions:
+      contents: read
+      id-token: write
+
+    concurrency:
+      group: ecs-lab-deployment
+      cancel-in-progress: false
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Download checked image
+        uses: actions/download-artifact@v4
+        with:
+          name: checked-image
+
+      - name: Load checked image
+        run: docker load -i image.tar
+
+      - name: Authenticate to AWS using OIDC
+        uses: aws-actions/configure-aws-credentials@v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          allowed-account-ids: '971422716815'
+
+      - name: Login to Amazon ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Push checked image to ECR
+        id: image
+        env:
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+        run: |
+          IMAGE_URI="$REGISTRY/$ECR_REPOSITORY:$GITHUB_SHA"
+          docker tag ecs-lab:$GITHUB_SHA "$IMAGE_URI"
+          docker push "$IMAGE_URI"
+          echo "image=$IMAGE_URI" >> "$GITHUB_OUTPUT"
+
+      - name: Update image in task definition
+        id: task
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: task-definition.json
+          container-name: ${{ env.CONTAINER_NAME }}
+          image: ${{ steps.image.outputs.image }}
+
+      - name: Deploy task definition
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+        with:
+          task-definition: ${{ steps.task.outputs.task-definition }}
+          service: ${{ env.ECS_SERVICE }}
+          cluster: ${{ env.ECS_CLUSTER }}
+          wait-for-service-stability: true
+
+      - name: Check deployed health endpoint
+        run: |
+          response=$(curl -fsS \
+            --retry 5 \
+            --retry-delay 5 \
+            --retry-all-errors \
+            --connect-timeout 10 \
+            --max-time 15 \
+            http://github-actions-lab-alb-1625662518.us-east-1.elb.amazonaws.com/health)
+          test "$response" = "OK"
+          echo "Deployed application is responding OK"
