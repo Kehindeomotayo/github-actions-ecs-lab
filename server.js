@@ -3,7 +3,7 @@ const http = require("node:http");
 const server = http.createServer((req, res) => {
   if (req.url === "/health") {
     res.writeHead(200, { "Content-Type": "text/plain" });
-    return res.end("return res.end("OK");");
+    return res.end("OK");
   }
 
   res.writeHead(200, { "Content-Type": "text/html" });
