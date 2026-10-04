@@ -7,7 +7,7 @@ const server = http.createServer((req, res) => {
   }
 
   res.writeHead(200, { "Content-Type": "text/html" });
-  res.end("<h1>Deployed with GitHub Actions to AWS ECS!</h1>");
+  res.end("<h1>Kehinde's CI/CD pipeline works!</h1>");
 });
 
 server.listen(3000, "0.0.0.0", () => {
