@@ -111,7 +111,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           persist-credentials: false
 
@@ -122,6 +122,27 @@ jobs:
 
       - name: Load checked image
         run: docker load -i image.tar
+
+      - name: Show OIDC identity claims
+        run: |
+          python3 - <<'PY'
+          import os, json, base64, urllib.request
+
+          url = os.environ["ACTIONS_ID_TOKEN_REQUEST_URL"]
+          url += ("&" if "?" in url else "?") + "audience=sts.amazonaws.com"
+          request = urllib.request.Request(url, headers={
+              "Authorization": "Bearer " + os.environ["ACTIONS_ID_TOKEN_REQUEST_TOKEN"]
+          })
+          with urllib.request.urlopen(request, timeout=30) as response:
+              token = json.load(response)["value"]
+
+          payload = token.split(".")[1]
+          payload += "=" * (-len(payload) % 4)
+          claims = json.loads(base64.urlsafe_b64decode(payload))
+
+          for key in ("sub", "aud", "repository", "ref"):
+              print(f"{key}: {claims.get(key)}")
+          PY
 
       - name: Authenticate to AWS using OIDC
         uses: aws-actions/configure-aws-credentials@v6.3.0
